@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>근태 동기화 뷰어</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 0; padding: 24px; background: #f7f7f8; color: #1a1a1a; }
+  h1 { font-size: 18px; margin-bottom: 4px; }
+  p.sub { color: #666; margin-top: 0; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); margin-top: 16px; }
+  th, td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #eee; font-size: 13px; }
+  th { background: #fafafa; position: sticky; top: 0; }
+  tr:last-child td { border-bottom: none; }
+  #status { font-size: 13px; color: #888; }
+</style>
+</head>
+<body>
+  <h1>S1 근태 동기화 결과</h1>
+  <p class="sub">매일 자동으로 수집된 원본 데이터를 그대로 보여줍니다.</p>
+  <p id="status">불러오는 중...</p>
+  <table id="table" hidden>
+    <thead><tr id="head-row"></tr></thead>
+    <tbody id="body-rows"></tbody>
+  </table>
+
+  <!-- Supabase JS 클라이언트 (읽기 전용 anon key만 사용 - 안전) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
+  <script>
+    // TODO: 아래 두 값을 본인 Supabase 프로젝트 값으로 채워주세요.
+    // SUPABASE_URL: 프로젝트 Settings > API > Project URL
+    // SUPABASE_ANON_KEY: 프로젝트 Settings > API > anon public key (service_role 키 아님! 절대 여기 넣지 마세요)
+    const SUPABASE_URL = "https://YOUR_PROJECT.supabase.co";
+    const SUPABASE_ANON_KEY = "YOUR_ANON_PUBLIC_KEY";
+
+    const { createClient } = supabase;
+    const client = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    async function load() {
+      const status = document.getElementById("status");
+      const table = document.getElementById("table");
+      const headRow = document.getElementById("head-row");
+      const bodyRows = document.getElementById("body-rows");
+
+      const { data, error } = await client
+        .from("attendance_raw")
+        .select("*")
+        .order("synced_at", { ascending: false })
+        .limit(200);
+
+      if (error) {
+        status.textContent = "불러오기 실패: " + error.message;
+        return;
+      }
+      if (!data || data.length === 0) {
+        status.textContent = "아직 동기화된 데이터가 없습니다.";
+        return;
+      }
+
+      // row(jsonb) 안의 키들을 모아 컬럼으로 사용
+      const columns = Array.from(
+        new Set(data.flatMap((d) => Object.keys(d.row || {})))
+      );
+
+      headRow.innerHTML =
+        "<th>동기화 시각</th>" + columns.map((c) => `<th>${c}</th>`).join("");
+
+      bodyRows.innerHTML = data
+        .map((d) => {
+          const cells = columns
+            .map((c) => `<td>${d.row?.[c] ?? ""}</td>`)
+            .join("");
+          const t = new Date(d.synced_at).toLocaleString("ko-KR");
+          return `<tr><td>${t}</td>${cells}</tr>`;
+        })
+        .join("");
+
+      status.hidden = true;
+      table.hidden = false;
+    }
+
+    load();
+  </script>
+</body>
+</html>
