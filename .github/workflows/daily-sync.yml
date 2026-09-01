@@ -1,0 +1,45 @@
+name: S1 근태 데이터 매일 동기화
+
+on:
+  schedule:
+    # 매일 KST 06:00 = UTC 21:00 (전날)
+    - cron: "0 21 * * *"
+  workflow_dispatch: {}  # Actions 탭에서 수동 실행 버튼도 사용 가능
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설치
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 의존성 설치
+        run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: 근태 데이터 동기화 실행
+        env:
+          S1_BASE_URL: ${{ vars.S1_BASE_URL }}
+          S1_USERNAME: ${{ secrets.S1_USERNAME }}
+          S1_PASSWORD: ${{ secrets.S1_PASSWORD }}
+          S1_MENU_TEXT: ${{ vars.S1_MENU_TEXT }}
+          S1_DOWNLOAD_BUTTON_TEXT: ${{ vars.S1_DOWNLOAD_BUTTON_TEXT }}
+          BACKEND_API_URL: ${{ secrets.BACKEND_API_URL }}
+          BACKEND_API_KEY: ${{ secrets.BACKEND_API_KEY }}
+          DEBUG: "1" # 단계별 스크린샷을 남겨서 실패 시 원인 파악에 사용
+        run: python scripts/sync_attendance.py
+
+      - name: 실패 시 스크린샷 업로드 (디버깅용)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshots
+          path: screenshots/
+          if-no-files-found: ignore
