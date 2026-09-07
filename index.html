@@ -12,7 +12,7 @@
     padding: 24px 16px 60px;
     background: #f6f7f8;
     color: #1a1a1a;
-    max-width: 960px;
+    max-width: 900px;
     margin-left: auto;
     margin-right: auto;
   }
@@ -64,24 +64,24 @@
   #status { margin-top: 14px; font-size: 13px; white-space: pre-wrap; }
   #status.ok { color: #1a7f37; }
   #status.err { color: #c0392b; }
-  table { width: 100%; border-collapse: collapse; font-size: 12px; }
-  th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #eee; white-space: nowrap; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid #eee; white-space: nowrap; }
   th { background: #fafafa; position: sticky; top: 0; }
-  .table-wrap { overflow-x: auto; max-height: 500px; margin-top: 8px; border: 1px solid #eee; border-radius: 8px; }
+  .table-wrap { overflow-x: auto; max-height: 520px; margin-top: 8px; border: 1px solid #eee; border-radius: 8px; }
   h2 { font-size: 15px; margin: 0 0 10px; }
   .fname { font-size: 13px; color: #444; margin-top: 10px; min-height: 18px; }
   .filter-row { display: flex; gap: 12px; align-items: flex-end; margin-bottom: 4px; flex-wrap: wrap; }
   .filter-row > div { flex: 1; min-width: 160px; }
   .filter-row label { margin-bottom: 6px; }
   .filter-row select { margin-bottom: 0; }
-  .count-badge { font-size: 12px; color: #888; margin-left: 4px; }
+  .count-badge { font-size: 12px; color: #888; margin-left: 4px; font-weight: normal; }
   .col-strong { font-weight: 600; }
   .empty-cell { color: #bbb; }
 </style>
 </head>
 <body>
   <h1>근태 엑셀 업로드</h1>
-  <p class="sub">S1(에스원) 관리자사이트에서 직접 다운로드한 근태 엑셀 파일을 여기에 올려주세요. 출근/퇴근 시간만 자동으로 정리되어 저장됩니다.</p>
+  <p class="sub">S1(에스원) 모바일 출·퇴근 엑셀 파일을 여기에 올려주세요. 지점 / 이름 / 계정 / 출근시간 / 퇴근시간이 자동으로 정리되고, 자정을 넘겨 퇴근한 경우(예: 17:00 출근 → 26:00 퇴근)에도 같은 출근일의 근무 기록 하나로 합쳐져서 집계가 정확해집니다.</p>
 
   <div class="card">
     <label for="uploader">업로더 이름 (선택)</label>
@@ -121,18 +121,13 @@
           <tr>
             <th>지점</th>
             <th>이름</th>
-            <th>사번</th>
+            <th>계정</th>
             <th>근무일</th>
             <th>출근</th>
             <th>퇴근</th>
-            <th>확정출근</th>
-            <th>확정퇴근</th>
-            <th>근무시작시각</th>
-            <th>근무종료시각</th>
-            <th>인증방식</th>
+            <th>근무시간</th>
             <th>업로더</th>
             <th>파일명</th>
-            <th>업로드 시각</th>
           </tr>
         </thead>
         <tbody id="body-rows"></tbody>
@@ -189,56 +184,181 @@
       statusEl.className = "";
     }
 
-    // S1 근태 엑셀 전용 파서
-    // 실제 구조: 1~2행 = 병합된 헤더(근무자 정보/근무위치/인증방식/근무일/근무시간[시작·종료]/출·퇴근[출근·퇴근]/확정승인[출근·퇴근])
-    // 3행부터 실제 데이터, 컬럼 순서는 A~J 고정
+    // S1 "모바일 출·퇴근" 엑셀 전용 파서
+    // 1~2행 = 병합된 헤더, 3행부터 실제 데이터
+    // A열 예시: "여의도KBS점PT 김가영 (9227@DBEER.CO.KR)" -> 이름 "김가영", 계정 "9227@DBEER.CO.KR"
+    // B열 = 지점(근무위치), D열 = 근무일, G열 = 출근, H열 = 퇴근
     function cell(v) {
       if (v === null || v === undefined) return "";
-      return String(v).trim();
+      return String(v).replace(/\n/g, " ").trim();
     }
 
-    function parseNameAndId(info) {
-      // 예: "직영사업본부 홍길동(12345)" -> 이름 "홍길동", 사번 "12345"
-      // 예: "직영사업본부 장용수" (사번 없음) -> 이름 "장용수", 사번 ""
-      let 사번 = "";
+    function parseNameAndAccount(info) {
+      // "...지점명(PT) 이름 (계정)" -> 이름 = 괄호 앞의 마지막 단어, 계정 = 괄호 안 내용
+      let 계정 = "";
       let namePart = info;
       const m = info.match(/\(([^)]+)\)\s*$/);
       if (m) {
-        사번 = m[1].trim();
+        계정 = m[1].trim();
         namePart = info.slice(0, m.index).trim();
       }
       const tokens = namePart.split(/\s+/).filter(Boolean);
       const 이름 = tokens.length ? tokens[tokens.length - 1] : namePart;
-      return { 이름, 사번 };
+      return { 이름, 계정 };
+    }
+
+    // 자정을 넘긴 퇴근 처리
+    // S1 원본은 "익일 02:00"처럼 표시하거나, 다음날 날짜의 별도 행(출근 없이 퇴근만)으로 남기는 등
+    // 표기 방식이 섞여 있어서, 두 경우 모두 인식해서 "26:00"처럼 24시 이상 표기로 통일하고
+    // 같은 출근일(근무일) 밑에 하나의 근무 기록으로 합칩니다.
+    function stripNextDayTag(raw) {
+      if (!raw) return { tagged: false, time: "" };
+      const tagged = /익일/.test(raw);
+      const m = raw.match(/([0-9]{1,2}:[0-9]{2})/);
+      return { tagged, time: m ? m[1] : "" };
+    }
+
+    function extendHour(hhmm) {
+      const [h, m] = hhmm.split(":").map(Number);
+      return `${String(h + 24).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+    }
+
+    function addDaysStr(dateStr, days) {
+      const d = new Date(dateStr + "T00:00:00");
+      d.setDate(d.getDate() + days);
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    }
+
+    // 근무일 + 출근/퇴근(문자열, "익일" 태그 포함 가능) 원자료를 받아서
+    // 자정을 넘긴 근무를 하나의 근무 기록(같은 근무일, 퇴근은 24시 이상 표기)으로 합칩니다.
+    function buildShiftRecords(rawList) {
+      const byEmp = new Map();
+      rawList.forEach((r) => {
+        const key = r.계정 || `${r.이름}|${r.지점}`;
+        if (!byEmp.has(key)) byEmp.set(key, []);
+        byEmp.get(key).push(r);
+      });
+
+      const out = [];
+      for (const list of byEmp.values()) {
+        list.sort((a, b) => a.근무일.localeCompare(b.근무일));
+        const consumed = new Set();
+
+        for (let i = 0; i < list.length; i++) {
+          if (consumed.has(i)) continue;
+          const cur = list[i];
+
+          if (!cur.출근raw) {
+            // 출근 기록 없이 퇴근만 있는 행: 전날 근무의 자정 이후 퇴근일 수 있으나,
+            // 그 전날 기록이 이 파일에 없으면(consumed되지 않았다면) 그대로 단독 표시
+            const info = stripNextDayTag(cur.퇴근raw);
+            out.push({
+              지점: cur.지점,
+              이름: cur.이름,
+              계정: cur.계정,
+              근무일: cur.근무일,
+              출근: "",
+              퇴근: info.time,
+            });
+            continue;
+          }
+
+          const outInfo = cur.퇴근raw ? stripNextDayTag(cur.퇴근raw) : null;
+          let candidateIdx = -1;
+          if (!outInfo || !outInfo.time || outInfo.tagged) {
+            const nextDate = addDaysStr(cur.근무일, 1);
+            candidateIdx = list.findIndex(
+              (r2, j) =>
+                j !== i &&
+                !consumed.has(j) &&
+                r2.근무일 === nextDate &&
+                !r2.출근raw &&
+                r2.퇴근raw
+            );
+          }
+
+          let outTime = "";
+          if (outInfo && outInfo.time) {
+            outTime = outInfo.tagged ? extendHour(outInfo.time) : outInfo.time;
+          } else if (candidateIdx !== -1) {
+            const candInfo = stripNextDayTag(list[candidateIdx].퇴근raw);
+            if (candInfo.time) outTime = extendHour(candInfo.time);
+          }
+          if (candidateIdx !== -1) consumed.add(candidateIdx);
+
+          out.push({
+            지점: cur.지점,
+            이름: cur.이름,
+            계정: cur.계정,
+            근무일: cur.근무일,
+            출근: cur.출근raw,
+            퇴근: outTime,
+          });
+        }
+      }
+      return out;
+    }
+
+    function toMinutes(hhmm) {
+      const m = hhmm && hhmm.match(/^([0-9]{1,2}):([0-9]{2})$/);
+      return m ? Number(m[1]) * 60 + Number(m[2]) : null;
+    }
+
+    function workDuration(inTime, outTime) {
+      const a = toMinutes(inTime);
+      const b = toMinutes(outTime);
+      if (a === null || b === null || b < a) return "";
+      const mins = b - a;
+      return `${Math.floor(mins / 60)}시간 ${mins % 60}분`;
+    }
+
+    // S1 엑셀 파일 중 일부는 내부에 저장된 "사용 범위(dimension)" 정보가 실제 데이터보다
+    // 훨씬 작게 잘못 기록되어 있어서, 그대로 읽으면 앞부분 몇 줄만 읽히고 나머지는
+    // 통째로 누락됩니다 (많은 데이터인데 일부만 반영되는 원인). 실제 셀 주소를 스캔해서
+    // 범위를 다시 계산해 바로잡습니다.
+    function fixSheetRange(ws) {
+      let maxRow = 0;
+      let maxCol = 0;
+      for (const addr in ws) {
+        if (addr[0] === "!") continue;
+        const decoded = XLSX.utils.decode_cell(addr);
+        if (decoded.r > maxRow) maxRow = decoded.r;
+        if (decoded.c > maxCol) maxCol = decoded.c;
+      }
+      ws["!ref"] = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: maxRow, c: maxCol } });
+      return ws;
     }
 
     function parseSheet(ws) {
+      fixSheetRange(ws);
       const raw = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: null });
       const dataRows = raw.slice(2); // 앞 2행(병합 헤더)은 건너뜀
-      const records = [];
+      const rawRecords = [];
 
       for (const r of dataRows) {
         if (!r || r.every((c) => c === null || c === "")) continue;
         const info = cell(r[0]);
         if (!info) continue;
 
-        const { 이름, 사번 } = parseNameAndId(info);
+        const { 이름, 계정 } = parseNameAndAccount(info);
 
-        records.push({
-          이름,
-          사번,
-          지점: cell(r[1]),
-          인증방식: cell(r[2]),
+        rawRecords.push({
           근무일: cell(r[3]),
-          근무시작시각: cell(r[4]),
-          근무종료시각: cell(r[5]),
-          출근: cell(r[6]),
-          퇴근: cell(r[7]),
-          확정출근: cell(r[8]),
-          확정퇴근: cell(r[9]),
+          지점: cell(r[1]),
+          이름,
+          계정,
+          출근raw: cell(r[6]),
+          퇴근raw: cell(r[7]),
         });
       }
-      return records;
+
+      return buildShiftRecords(rawRecords).map((rec) => ({
+        ...rec,
+        근무시간: workDuration(rec.출근, rec.퇴근),
+      }));
     }
 
     uploadBtn.addEventListener("click", async () => {
@@ -288,7 +408,7 @@
         }
 
         statusEl.className = "ok";
-        statusEl.textContent = `완료! ${payload.length}건이 업로드되었습니다.`;
+        statusEl.textContent = `완료! 근무 기록 ${payload.length}건이 업로드되었습니다. (자정을 넘긴 근무는 출근일 기준으로 하나로 합쳐졌습니다)`;
         selectedFile = null;
         fileInput.value = "";
         fnameEl.textContent = "";
@@ -324,29 +444,33 @@
 
       countBadge.textContent = `(${filtered.length}건 / 전체 ${allRecords.length}건)`;
 
+      // 지점 -> 근무일 -> 이름 순으로 정렬해서, 지점별로 모아 볼 수 있게 함
+      filtered.sort((a, b) => {
+        const ra = a.row || {}, rb = b.row || {};
+        return (
+          (ra.지점 || "").localeCompare(rb.지점 || "") ||
+          (ra.근무일 || "").localeCompare(rb.근무일 || "") ||
+          (ra.이름 || "").localeCompare(rb.이름 || "")
+        );
+      });
+
       const td = (v, strong) =>
         v ? `<td${strong ? ' class="col-strong"' : ""}>${v}</td>` : `<td class="empty-cell">-</td>`;
 
       bodyRows.innerHTML = filtered
         .map((d) => {
           const r = d.row || {};
-          const t = new Date(d.synced_at).toLocaleString("ko-KR");
           return (
             `<tr>` +
-            td(r.지점) +
+            td(r.지점, true) +
             td(r.이름, true) +
-            td(r.사번) +
+            td(r.계정) +
             td(r.근무일) +
-            td(r.출근, true) +
-            td(r.퇴근, true) +
-            td(r.확정출근) +
-            td(r.확정퇴근) +
-            td(r.근무시작시각) +
-            td(r.근무종료시각) +
-            td(r.인증방식) +
+            td(r.출근) +
+            td(r.퇴근) +
+            td(r.근무시간) +
             td(d.uploaded_by) +
             td(d.source_file) +
-            `<td>${t}</td>` +
             `</tr>`
           );
         })
@@ -360,7 +484,7 @@
       const table = document.getElementById("table");
 
       try {
-        const url = `${TABLE_URL}?select=*&order=synced_at.desc&limit=1000`;
+        const url = `${TABLE_URL}?select=*&order=synced_at.desc&limit=2000`;
         const resp = await fetch(url, { headers });
         if (!resp.ok) throw new Error(`(${resp.status})`);
         const data = await resp.json();
