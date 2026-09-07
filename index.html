@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>근태 엑셀 업로드</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Malgun Gothic", sans-serif;
+    margin: 0;
+    padding: 24px 16px 60px;
+    background: #f6f7f8;
+    color: #1a1a1a;
+    max-width: 720px;
+    margin-left: auto;
+    margin-right: auto;
+  }
+  h1 { font-size: 20px; margin-bottom: 4px; }
+  p.sub { color: #666; margin-top: 0; font-size: 13px; line-height: 1.5; }
+  .card {
+    background: white;
+    border-radius: 12px;
+    padding: 20px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+    margin-top: 16px;
+  }
+  label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: #333; }
+  input[type="text"] {
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    font-size: 14px;
+    margin-bottom: 16px;
+  }
+  .dropzone {
+    border: 2px dashed #ccc;
+    border-radius: 10px;
+    padding: 28px 16px;
+    text-align: center;
+    color: #888;
+    font-size: 14px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .dropzone.drag { border-color: #4f8cff; background: #f0f6ff; color: #4f8cff; }
+  .dropzone input { display: none; }
+  button {
+    margin-top: 16px;
+    width: 100%;
+    padding: 12px;
+    background: #2f6fed;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button:disabled { background: #b7c8ea; cursor: not-allowed; }
+  #status { margin-top: 14px; font-size: 13px; white-space: pre-wrap; }
+  #status.ok { color: #1a7f37; }
+  #status.err { color: #c0392b; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #eee; white-space: nowrap; }
+  th { background: #fafafa; position: sticky; top: 0; }
+  .table-wrap { overflow-x: auto; max-height: 400px; margin-top: 8px; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  .fname { font-size: 13px; color: #444; margin-top: 10px; min-height: 18px; }
+</style>
+</head>
+<body>
+  <h1>근태 엑셀 업로드</h1>
+  <p class="sub">S1(에스원) 관리자사이트에서 직접 다운로드한 근태 엑셀 파일을 여기에 올려주세요. 자동으로 정리되어 저장됩니다.</p>
+
+  <div class="card">
+    <label for="uploader">업로더 이름 (선택)</label>
+    <input type="text" id="uploader" placeholder="예: 홍길동" />
+
+    <label>엑셀 파일</label>
+    <div class="dropzone" id="dropzone">
+      파일을 여기로 끌어다 놓거나, 클릭해서 선택하세요<br />(.xlsx 파일)
+      <input type="file" id="fileInput" accept=".xlsx,.xls" />
+    </div>
+    <div class="fname" id="fname"></div>
+
+    <button id="uploadBtn" disabled>업로드</button>
+    <div id="status"></div>
+  </div>
+
+  <div class="card">
+    <h2>최근 업로드 내역 (최신 200건)</h2>
+    <div id="recentStatus" style="font-size:13px;color:#888;">불러오는 중...</div>
+    <div class="table-wrap">
+      <table id="table" hidden>
+        <thead><tr id="head-row"></tr></thead>
+        <tbody id="body-rows"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+  <script>
+    // ---- Supabase 설정 ----
+    const SUPABASE_URL = "https://mfglllfbbikaihtlljxx.supabase.co";
+    const SUPABASE_ANON_KEY = "sb_publishable_LLl81DT_U3gT5uIcdYFqaQ_nHshwtat";
+    const TABLE_URL = SUPABASE_URL + "/rest/v1/attendance_raw";
+
+    const headers = {
+      apikey: SUPABASE_ANON_KEY,
+      Authorization: "Bearer " + SUPABASE_ANON_KEY,
+    };
+
+    let selectedFile = null;
+
+    const dropzone = document.getElementById("dropzone");
+    const fileInput = document.getElementById("fileInput");
+    const fnameEl = document.getElementById("fname");
+    const uploadBtn = document.getElementById("uploadBtn");
+    const statusEl = document.getElementById("status");
+    const uploaderEl = document.getElementById("uploader");
+
+    dropzone.addEventListener("click", () => fileInput.click());
+    dropzone.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      dropzone.classList.add("drag");
+    });
+    dropzone.addEventListener("dragleave", () => dropzone.classList.remove("drag"));
+    dropzone.addEventListener("drop", (e) => {
+      e.preventDefault();
+      dropzone.classList.remove("drag");
+      if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+        handleFile(e.dataTransfer.files[0]);
+      }
+    });
+    fileInput.addEventListener("change", (e) => {
+      if (e.target.files && e.target.files[0]) handleFile(e.target.files[0]);
+    });
+
+    function handleFile(file) {
+      selectedFile = file;
+      fnameEl.textContent = "선택된 파일: " + file.name;
+      uploadBtn.disabled = false;
+      statusEl.textContent = "";
+      statusEl.className = "";
+    }
+
+    uploadBtn.addEventListener("click", async () => {
+      if (!selectedFile) return;
+      uploadBtn.disabled = true;
+      statusEl.className = "";
+      statusEl.textContent = "엑셀 파일을 읽는 중...";
+
+      try {
+        const buf = await selectedFile.arrayBuffer();
+        const wb = XLSX.read(buf, { type: "array", cellDates: true });
+        const wsName = wb.SheetNames[0];
+        const ws = wb.Sheets[wsName];
+        const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
+
+        if (!rows.length) {
+          statusEl.className = "err";
+          statusEl.textContent = "엑셀에서 데이터를 찾지 못했어요. 파일 내용을 확인해주세요.";
+          uploadBtn.disabled = false;
+          return;
+        }
+
+        const uploader = uploaderEl.value.trim() || null;
+        const now = new Date().toISOString();
+        const payload = rows.map((row) => ({
+          synced_at: now,
+          source_file: selectedFile.name,
+          uploaded_by: uploader,
+          row: row,
+        }));
+
+        statusEl.textContent = `${payload.length}건 업로드하는 중...`;
+
+        const resp = await fetch(TABLE_URL, {
+          method: "POST",
+          headers: {
+            ...headers,
+            "Content-Type": "application/json",
+            Prefer: "return=minimal",
+          },
+          body: JSON.stringify(payload),
+        });
+
+        if (!resp.ok) {
+          const text = await resp.text();
+          throw new Error(`서버 오류 (${resp.status}): ${text.slice(0, 300)}`);
+        }
+
+        statusEl.className = "ok";
+        statusEl.textContent = `완료! ${payload.length}건이 업로드되었습니다.`;
+        selectedFile = null;
+        fileInput.value = "";
+        fnameEl.textContent = "";
+        loadRecent();
+      } catch (err) {
+        statusEl.className = "err";
+        statusEl.textContent = "업로드 실패: " + err.message;
+      } finally {
+        uploadBtn.disabled = false;
+      }
+    });
+
+    async function loadRecent() {
+      const recentStatus = document.getElementById("recentStatus");
+      const table = document.getElementById("table");
+      const headRow = document.getElementById("head-row");
+      const bodyRows = document.getElementById("body-rows");
+
+      try {
+        const url = `${TABLE_URL}?select=*&order=synced_at.desc&limit=200`;
+        const resp = await fetch(url, { headers });
+        if (!resp.ok) throw new Error(`(${resp.status})`);
+        const data = await resp.json();
+
+        if (!data.length) {
+          recentStatus.textContent = "아직 업로드된 데이터가 없습니다.";
+          return;
+        }
+
+        const columns = Array.from(
+          new Set(data.flatMap((d) => Object.keys(d.row || {})))
+        );
+
+        headRow.innerHTML =
+          "<th>업로드 시각</th><th>업로더</th><th>파일명</th>" +
+          columns.map((c) => `<th>${c}</th>`).join("");
+
+        bodyRows.innerHTML = data
+          .map((d) => {
+            const cells = columns
+              .map((c) => `<td>${d.row?.[c] ?? ""}</td>`)
+              .join("");
+            const t = new Date(d.synced_at).toLocaleString("ko-KR");
+            return `<tr><td>${t}</td><td>${d.uploaded_by ?? ""}</td><td>${d.source_file ?? ""}</td>${cells}</tr>`;
+          })
+          .join("");
+
+        recentStatus.hidden = true;
+        table.hidden = false;
+      } catch (err) {
+        recentStatus.textContent = "불러오기 실패: " + err.message;
+      }
+    }
+
+    loadRecent();
+  </script>
+</body>
+</html>
