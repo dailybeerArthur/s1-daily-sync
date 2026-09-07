@@ -12,7 +12,7 @@
     padding: 24px 16px 60px;
     background: #f6f7f8;
     color: #1a1a1a;
-    max-width: 720px;
+    max-width: 960px;
     margin-left: auto;
     margin-right: auto;
   }
@@ -26,13 +26,15 @@
     margin-top: 16px;
   }
   label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; color: #333; }
-  input[type="text"] {
+  input[type="text"], select {
     width: 100%;
     padding: 10px 12px;
     border: 1px solid #ddd;
     border-radius: 8px;
     font-size: 14px;
     margin-bottom: 16px;
+    font-family: inherit;
+    background: white;
   }
   .dropzone {
     border: 2px dashed #ccc;
@@ -65,14 +67,21 @@
   table { width: 100%; border-collapse: collapse; font-size: 12px; }
   th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #eee; white-space: nowrap; }
   th { background: #fafafa; position: sticky; top: 0; }
-  .table-wrap { overflow-x: auto; max-height: 400px; margin-top: 8px; }
+  .table-wrap { overflow-x: auto; max-height: 500px; margin-top: 8px; border: 1px solid #eee; border-radius: 8px; }
   h2 { font-size: 15px; margin: 0 0 10px; }
   .fname { font-size: 13px; color: #444; margin-top: 10px; min-height: 18px; }
+  .filter-row { display: flex; gap: 12px; align-items: flex-end; margin-bottom: 4px; flex-wrap: wrap; }
+  .filter-row > div { flex: 1; min-width: 160px; }
+  .filter-row label { margin-bottom: 6px; }
+  .filter-row select { margin-bottom: 0; }
+  .count-badge { font-size: 12px; color: #888; margin-left: 4px; }
+  .col-strong { font-weight: 600; }
+  .empty-cell { color: #bbb; }
 </style>
 </head>
 <body>
   <h1>근태 엑셀 업로드</h1>
-  <p class="sub">S1(에스원) 관리자사이트에서 직접 다운로드한 근태 엑셀 파일을 여기에 올려주세요. 자동으로 정리되어 저장됩니다.</p>
+  <p class="sub">S1(에스원) 관리자사이트에서 직접 다운로드한 근태 엑셀 파일을 여기에 올려주세요. 출근/퇴근 시간만 자동으로 정리되어 저장됩니다.</p>
 
   <div class="card">
     <label for="uploader">업로더 이름 (선택)</label>
@@ -90,11 +99,42 @@
   </div>
 
   <div class="card">
-    <h2>최근 업로드 내역 (최신 200건)</h2>
+    <h2>최근 업로드 내역 <span class="count-badge" id="countBadge"></span></h2>
+    <div class="filter-row">
+      <div>
+        <label for="branchFilter">지점</label>
+        <select id="branchFilter">
+          <option value="">전체</option>
+        </select>
+      </div>
+      <div>
+        <label for="dateFilter">근무일</label>
+        <select id="dateFilter">
+          <option value="">전체</option>
+        </select>
+      </div>
+    </div>
     <div id="recentStatus" style="font-size:13px;color:#888;">불러오는 중...</div>
     <div class="table-wrap">
       <table id="table" hidden>
-        <thead><tr id="head-row"></tr></thead>
+        <thead>
+          <tr>
+            <th>지점</th>
+            <th>이름</th>
+            <th>사번</th>
+            <th>근무일</th>
+            <th>출근</th>
+            <th>퇴근</th>
+            <th>확정출근</th>
+            <th>확정퇴근</th>
+            <th>근무시작시각</th>
+            <th>근무종료시각</th>
+            <th>인증방식</th>
+            <th>업로더</th>
+            <th>파일명</th>
+            <th>업로드 시각</th>
+          </tr>
+        </thead>
         <tbody id="body-rows"></tbody>
       </table>
     </div>
@@ -113,6 +153,7 @@
     };
 
     let selectedFile = null;
+    let allRecords = []; // { synced_at, uploaded_by, source_file, row: {...} }
 
     const dropzone = document.getElementById("dropzone");
     const fileInput = document.getElementById("fileInput");
@@ -120,6 +161,8 @@
     const uploadBtn = document.getElementById("uploadBtn");
     const statusEl = document.getElementById("status");
     const uploaderEl = document.getElementById("uploader");
+    const branchFilterEl = document.getElementById("branchFilter");
+    const dateFilterEl = document.getElementById("dateFilter");
 
     dropzone.addEventListener("click", () => fileInput.click());
     dropzone.addEventListener("dragover", (e) => {
@@ -146,6 +189,58 @@
       statusEl.className = "";
     }
 
+    // S1 근태 엑셀 전용 파서
+    // 실제 구조: 1~2행 = 병합된 헤더(근무자 정보/근무위치/인증방식/근무일/근무시간[시작·종료]/출·퇴근[출근·퇴근]/확정승인[출근·퇴근])
+    // 3행부터 실제 데이터, 컬럼 순서는 A~J 고정
+    function cell(v) {
+      if (v === null || v === undefined) return "";
+      return String(v).trim();
+    }
+
+    function parseNameAndId(info) {
+      // 예: "직영사업본부 홍길동(12345)" -> 이름 "홍길동", 사번 "12345"
+      // 예: "직영사업본부 장용수" (사번 없음) -> 이름 "장용수", 사번 ""
+      let 사번 = "";
+      let namePart = info;
+      const m = info.match(/\(([^)]+)\)\s*$/);
+      if (m) {
+        사번 = m[1].trim();
+        namePart = info.slice(0, m.index).trim();
+      }
+      const tokens = namePart.split(/\s+/).filter(Boolean);
+      const 이름 = tokens.length ? tokens[tokens.length - 1] : namePart;
+      return { 이름, 사번 };
+    }
+
+    function parseSheet(ws) {
+      const raw = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false, defval: null });
+      const dataRows = raw.slice(2); // 앞 2행(병합 헤더)은 건너뜀
+      const records = [];
+
+      for (const r of dataRows) {
+        if (!r || r.every((c) => c === null || c === "")) continue;
+        const info = cell(r[0]);
+        if (!info) continue;
+
+        const { 이름, 사번 } = parseNameAndId(info);
+
+        records.push({
+          이름,
+          사번,
+          지점: cell(r[1]),
+          인증방식: cell(r[2]),
+          근무일: cell(r[3]),
+          근무시작시각: cell(r[4]),
+          근무종료시각: cell(r[5]),
+          출근: cell(r[6]),
+          퇴근: cell(r[7]),
+          확정출근: cell(r[8]),
+          확정퇴근: cell(r[9]),
+        });
+      }
+      return records;
+    }
+
     uploadBtn.addEventListener("click", async () => {
       if (!selectedFile) return;
       uploadBtn.disabled = true;
@@ -154,21 +249,21 @@
 
       try {
         const buf = await selectedFile.arrayBuffer();
-        const wb = XLSX.read(buf, { type: "array", cellDates: true });
+        const wb = XLSX.read(buf, { type: "array" });
         const wsName = wb.SheetNames[0];
         const ws = wb.Sheets[wsName];
-        const rows = XLSX.utils.sheet_to_json(ws, { defval: null });
+        const records = parseSheet(ws);
 
-        if (!rows.length) {
+        if (!records.length) {
           statusEl.className = "err";
-          statusEl.textContent = "엑셀에서 데이터를 찾지 못했어요. 파일 내용을 확인해주세요.";
+          statusEl.textContent = "엑셀에서 근태 데이터를 찾지 못했어요. 파일 형식을 확인해주세요.";
           uploadBtn.disabled = false;
           return;
         }
 
         const uploader = uploaderEl.value.trim() || null;
         const now = new Date().toISOString();
-        const payload = rows.map((row) => ({
+        const payload = records.map((row) => ({
           synced_at: now,
           source_file: selectedFile.name,
           uploaded_by: uploader,
@@ -206,47 +301,98 @@
       }
     });
 
+    function fillSelect(selectEl, values, placeholder) {
+      const current = selectEl.value;
+      selectEl.innerHTML = `<option value="">${placeholder}</option>` +
+        values.map((v) => `<option value="${v}">${v}</option>`).join("");
+      if (values.includes(current)) selectEl.value = current;
+    }
+
+    function renderTable() {
+      const table = document.getElementById("table");
+      const bodyRows = document.getElementById("body-rows");
+      const countBadge = document.getElementById("countBadge");
+
+      const branch = branchFilterEl.value;
+      const date = dateFilterEl.value;
+
+      const filtered = allRecords.filter((d) => {
+        if (branch && d.row?.지점 !== branch) return false;
+        if (date && d.row?.근무일 !== date) return false;
+        return true;
+      });
+
+      countBadge.textContent = `(${filtered.length}건 / 전체 ${allRecords.length}건)`;
+
+      const td = (v, strong) =>
+        v ? `<td${strong ? ' class="col-strong"' : ""}>${v}</td>` : `<td class="empty-cell">-</td>`;
+
+      bodyRows.innerHTML = filtered
+        .map((d) => {
+          const r = d.row || {};
+          const t = new Date(d.synced_at).toLocaleString("ko-KR");
+          return (
+            `<tr>` +
+            td(r.지점) +
+            td(r.이름, true) +
+            td(r.사번) +
+            td(r.근무일) +
+            td(r.출근, true) +
+            td(r.퇴근, true) +
+            td(r.확정출근) +
+            td(r.확정퇴근) +
+            td(r.근무시작시각) +
+            td(r.근무종료시각) +
+            td(r.인증방식) +
+            td(d.uploaded_by) +
+            td(d.source_file) +
+            `<td>${t}</td>` +
+            `</tr>`
+          );
+        })
+        .join("");
+
+      table.hidden = false;
+    }
+
     async function loadRecent() {
       const recentStatus = document.getElementById("recentStatus");
       const table = document.getElementById("table");
-      const headRow = document.getElementById("head-row");
-      const bodyRows = document.getElementById("body-rows");
 
       try {
-        const url = `${TABLE_URL}?select=*&order=synced_at.desc&limit=200`;
+        const url = `${TABLE_URL}?select=*&order=synced_at.desc&limit=1000`;
         const resp = await fetch(url, { headers });
         if (!resp.ok) throw new Error(`(${resp.status})`);
         const data = await resp.json();
 
+        allRecords = data;
+
         if (!data.length) {
           recentStatus.textContent = "아직 업로드된 데이터가 없습니다.";
+          table.hidden = true;
           return;
         }
 
-        const columns = Array.from(
-          new Set(data.flatMap((d) => Object.keys(d.row || {})))
-        );
+        const branches = Array.from(
+          new Set(data.map((d) => d.row?.지점).filter(Boolean))
+        ).sort();
+        const dates = Array.from(
+          new Set(data.map((d) => d.row?.근무일).filter(Boolean))
+        ).sort()
+          .reverse();
 
-        headRow.innerHTML =
-          "<th>업로드 시각</th><th>업로더</th><th>파일명</th>" +
-          columns.map((c) => `<th>${c}</th>`).join("");
-
-        bodyRows.innerHTML = data
-          .map((d) => {
-            const cells = columns
-              .map((c) => `<td>${d.row?.[c] ?? ""}</td>`)
-              .join("");
-            const t = new Date(d.synced_at).toLocaleString("ko-KR");
-            return `<tr><td>${t}</td><td>${d.uploaded_by ?? ""}</td><td>${d.source_file ?? ""}</td>${cells}</tr>`;
-          })
-          .join("");
+        fillSelect(branchFilterEl, branches, "전체");
+        fillSelect(dateFilterEl, dates, "전체");
 
         recentStatus.hidden = true;
-        table.hidden = false;
+        renderTable();
       } catch (err) {
         recentStatus.textContent = "불러오기 실패: " + err.message;
       }
     }
+
+    branchFilterEl.addEventListener("change", renderTable);
+    dateFilterEl.addEventListener("change", renderTable);
 
     loadRecent();
   </script>
